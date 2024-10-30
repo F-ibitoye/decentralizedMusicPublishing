@@ -16,7 +16,7 @@
 
 ;; --- Data Variables ---
 (define-data-var owner principal tx-sender)
-(define-data-var votes (map principal bool) (map))
+(define-data-var votes (map principal bool) (map {}))
 (define-data-var proposal (optional (tuple 
     (id uint)
     (title (string-ascii 100))

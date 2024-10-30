@@ -11,8 +11,8 @@ path = "contracts/musicLicensing.clar"
 [contracts.revenueShare]
 path = 'contracts/revenueShare.clar'
 
-[contracts.voting]
-path = 'contracts/voting.clar'
+[contracts.governanceAndVoting]
+path = 'contracts/governanceAndVoting.clar'
 
 [repl.analysis]
 passes = ["check_checker"]
