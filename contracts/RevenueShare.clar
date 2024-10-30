@@ -1,93 +1,99 @@
-(define-data-var owner principal tx-sender) ; Initial owner set as the contract deployer
-(define-data-var shares (map principal uint) {}) ; Each contributor with a percentage share
-(define-data-var total-share uint 0) ; Track total allocated shares
-(define-data-var revenue-pool uint 0) ; Track any undistributed revenue
+;; Revenue Sharing Contract
 
-;; Set a contributor's share percentage (owner-only)
+;; --- Constants ---
+(define-constant ERR-UNAUTHORIZED u1)
+(define-constant ERR-INVALID-SHARE u2)
+(define-constant ERR-TOTAL-EXCEEDED u3)
+(define-constant ERR-NOT-FOUND u4)
+
+;; --- Data Variables ---
+(define-data-var owner principal tx-sender)
+(define-data-var shares (map principal uint) (map))
+(define-data-var total-share uint u0)
+(define-data-var revenue-pool uint u0)
+(define-data-var voting-contract (optional principal) none)
+(define-data-var licensing-contract (optional principal) none)
+
+;; --- Authorization Functions ---
+
+(define-public (set-contracts (voting principal) (licensing principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get owner)) (err ERR-UNAUTHORIZED))
+    (var-set voting-contract (some voting))
+    (var-set licensing-contract (some licensing))
+    (ok true)))
+
+;; --- Proposal Implementation ---
+
+(define-public (implement-proposal (proposal-id uint) (target (optional principal)) (amount uint))
+  (begin
+    ;; Verify caller is voting contract
+    (asserts! (is-eq (some tx-sender) (var-get voting-contract)) (err ERR-UNAUTHORIZED))
+    
+    (match target
+      recipient (set-share recipient amount)  ;; Update specific share
+      (distribute-revenue))))  ;; Distribute accumulated revenue
+
+;; --- Share Management ---
+
 (define-public (set-share (contributor principal) (share uint))
   (begin
-    (asserts! (is-eq tx-sender (var-get owner)) (err "Unauthorized"))
-    (asserts! (<= share 100) (err "Invalid share"))
-    ;; Calculate new total-share after updating or inserting
-    (let ((current-share (default 0 (map-get? shares contributor)))
-          (new-total-share (+ (- (var-get total-share) current-share) share)))
-      (asserts! (<= new-total-share 100) (err "Total shares exceed 100%"))
-      (map-insert shares contributor share)
-      (var-set total-share new-total-share)
-    )
-    (ok true)
-  )
-)
+    (asserts! (or 
+      (is-eq tx-sender (var-get owner))
+      (is-eq (some tx-sender) (var-get voting-contract))) 
+      (err ERR-UNAUTHORIZED))
+    (asserts! (<= share u100) (err ERR-INVALID-SHARE))
+    
+    (let ((current-share (default-to u0 (map-get? shares contributor)))
+          (new-total (- (+ (var-get total-share) share) current-share)))
+      
+      (asserts! (<= new-total u100) (err ERR-TOTAL-EXCEEDED))
+      (var-set total-share new-total)
+      (ok (map-set shares contributor share)))))
 
-;; Remove a contributor from the share map (owner-only)
-(define-public (remove-contributor (contributor principal))
+;; --- Revenue Distribution ---
+
+(define-public (receive-payment)
   (begin
-    (asserts! (is-eq tx-sender (var-get owner)) (err "Unauthorized"))
-    (match (map-get? shares contributor)
-      some-share
-      (begin
-        ;; Update total-share after removal
-        (var-set total-share (- (var-get total-share) some-share))
-        (map-delete shares contributor)
-        (ok true)
-      )
-      none (err "Contributor not found")
-    )
-  )
-)
+    ;; Only accept payments from licensing contract
+    (asserts! (is-eq (some tx-sender) (var-get licensing-contract)) 
+      (err ERR-UNAUTHORIZED))
+    (var-set revenue-pool (+ (var-get revenue-pool) (stx-get-balance tx-sender)))
+    (ok true)))
 
-;; Distribute revenue based on each contributor's share
-(define-public (distribute-revenue (total-amount uint))
+(define-public (distribute-revenue)
   (begin
-    (var-set revenue-pool 0) ; Reset the pool before distribution
-    (map-fold shares
-      (fn (contributor share)
-        (let ((amount (/ (* total-amount share) 100)))
-          (let ((result (stx-transfer? amount tx-sender contributor)))
-            ;; Accumulate any undistributed amount in the pool in case of rounding
-            (if (is-ok result)
-              (ok true)
-              (var-set revenue-pool (+ (var-get revenue-pool) amount))
-            )
-          )
-        )
-      )
-    true)
-    (ok true)
-  )
-)
+    (asserts! (or 
+      (is-eq tx-sender (var-get owner))
+      (is-eq (some tx-sender) (var-get voting-contract))) 
+      (err ERR-UNAUTHORIZED))
+    
+    (let ((total-amount (var-get revenue-pool)))
+      (var-set revenue-pool u0)  ;; Reset pool before distribution
+      (try! (distribute-shares total-amount))
+      (ok true))))
 
-;; Change contract owner
-(define-public (set-owner (new-owner principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get owner)) (err "Unauthorized"))
-    (var-set owner new-owner)
-    (ok true)
-  )
-)
+(define-private (distribute-shares (total-amount uint))
+  (fold shares 
+    (lambda (contributor share prior-result)
+      (match prior-result
+        success 
+        (let ((amount (/ (* total-amount share) u100)))
+          (if (> amount u0)
+            (match (stx-transfer? amount tx-sender contributor)
+              success (ok true)
+              error (err ERR-UNAUTHORIZED))
+            (ok true)))
+        error error))
+    (ok true)))
 
-;; --- Read-Only Query Functions ---
+;; --- Read Only Functions ---
 
-;; Get the total allocated share
-(define-read-only (get-total-share) (response uint uint)
-  (ok (var-get total-share))
-)
+(define-read-only (get-share (contributor principal))
+  (ok (default-to u0 (map-get? shares contributor))))
 
-;; Get the share of a specific contributor
-(define-read-only (get-contributor-share (contributor principal)) (response uint uint)
-  (match (map-get? shares contributor)
-    some-share (ok some-share)
-    none (err "Contributor not found")
-  )
-)
+(define-read-only (get-total-share)
+  (ok (var-get total-share)))
 
-;; List all contributors and their shares
-(define-read-only (list-contributors) (response (list 200 (tuple (contributor principal) (share uint))) uint)
-  (ok (map-to (tuple (contributor principal) (share uint)) shares (tuple contributor (get share shares[contributor]))))
-)
-
-;; Get the current revenue pool balance (any undistributed amount)
-(define-read-only (get-revenue-pool) (response uint uint)
-  (ok (var-get revenue-pool))
-)
-
+(define-read-only (get-revenue-pool)
+  (ok (var-get revenue-pool)))
